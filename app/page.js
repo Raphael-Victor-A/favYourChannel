@@ -1,8 +1,11 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { supabase, supabaseConfigured } from '@/lib/supabase';
+import { useAuth } from '@/lib/useAuth';
+import { useChannels } from '@/lib/useChannels';
+import AuthModal from '@/components/AuthModal';
 
-const LS_CHANNELS = 'meus-canais:channels';
 const LS_WATCHED = 'meus-canais:watched';
 const LS_PREFS = 'meus-canais:prefs';
 const LS_LAST_VISIT = 'meus-canais:lastVisit';
@@ -51,8 +54,19 @@ function Avatar({ channel }) {
 }
 
 export default function Home() {
-  const [ready, setReady] = useState(false);
-  const [channels, setChannels] = useState([]);
+  const { user, loading: authLoading, recovering, setRecovering } = useAuth();
+  const {
+    channels,
+    ready: channelsReady,
+    error: channelsError,
+    imported,
+    clearImported,
+    addChannel: saveChannel,
+    removeChannel: deleteChannel,
+  } = useChannels(user, authLoading);
+  const [authModal, setAuthModal] = useState(null); // null | 'login' | 'signup'
+
+  const [prefsReady, setPrefsReady] = useState(false);
   const [watched, setWatched] = useState({});
   const [prefs, setPrefs] = useState({ hideShorts: false, hideWatched: false });
   const [prevVisit, setPrevVisit] = useState(null);
@@ -71,17 +85,20 @@ export default function Home() {
 
   // Carrega do localStorage
   useEffect(() => {
-    setChannels(load(LS_CHANNELS, []));
     setWatched(load(LS_WATCHED, {}));
     setPrefs((p) => ({ ...p, ...load(LS_PREFS, {}) }));
     setPrevVisit(load(LS_LAST_VISIT, null));
     save(LS_LAST_VISIT, new Date().toISOString());
-    setReady(true);
+    setPrefsReady(true);
   }, []);
 
-  useEffect(() => { if (ready) save(LS_CHANNELS, channels); }, [channels, ready]);
-  useEffect(() => { if (ready) save(LS_WATCHED, watched); }, [watched, ready]);
-  useEffect(() => { if (ready) save(LS_PREFS, prefs); }, [prefs, ready]);
+  useEffect(() => { if (prefsReady) save(LS_WATCHED, watched); }, [watched, prefsReady]);
+  useEffect(() => { if (prefsReady) save(LS_PREFS, prefs); }, [prefs, prefsReady]);
+
+  const ready = prefsReady && channelsReady;
+
+  // Ao trocar de conta, volta o filtro para "Todos"
+  useEffect(() => { setActiveChannel(null); }, [user?.id]);
 
   const channelIds = useMemo(() => channels.map((c) => c.id).join(','), [channels]);
   const reqId = useRef(0);
@@ -123,7 +140,7 @@ export default function Home() {
       if (channels.some((c) => c.id === data.id)) {
         setFormError(`"${data.title}" já está na sua lista.`);
       } else {
-        setChannels((cs) => [...cs, data]);
+        await saveChannel(data);
         setInput('');
       }
     } catch (err) {
@@ -133,11 +150,19 @@ export default function Home() {
     }
   }
 
-  function removeChannel(id) {
+  async function removeChannel(id) {
     const ch = channels.find((c) => c.id === id);
     if (!confirm(`Remover "${ch?.title}" dos seus canais?`)) return;
-    setChannels((cs) => cs.filter((c) => c.id !== id));
-    if (activeChannel === id) setActiveChannel(null);
+    try {
+      await deleteChannel(id);
+      if (activeChannel === id) setActiveChannel(null);
+    } catch (err) {
+      setFormError(err.message);
+    }
+  }
+
+  async function signOut() {
+    await supabase.auth.signOut();
   }
 
   function openVideo(v) {
@@ -194,11 +219,35 @@ export default function Home() {
               {adding ? 'Buscando…' : 'Adicionar'}
             </button>
           </form>
+          {supabaseConfigured && !authLoading && (
+            user ? (
+              <div className="user-menu">
+                <span className="user-email" title={user.email}>{user.email}</span>
+                <button className="btn" onClick={signOut}>Sair</button>
+              </div>
+            ) : (
+              <button className="btn" onClick={() => setAuthModal('login')}>Entrar</button>
+            )
+          )}
         </div>
         {formError && <div className="form-error">{formError}</div>}
       </header>
 
       <main className="container">
+        {supabaseConfigured && !authLoading && !user && channels.length > 0 && (
+          <div className="note">
+            Seus canais estão salvos só neste navegador.{' '}
+            <button className="link-btn" onClick={() => setAuthModal('signup')}>Crie uma conta</button>{' '}
+            para acessá-los em qualquer dispositivo.
+          </div>
+        )}
+        {imported > 0 && (
+          <div className="note">
+            {imported === 1 ? '1 canal deste navegador foi salvo' : `${imported} canais deste navegador foram salvos`} na sua conta.{' '}
+            <button className="link-btn" onClick={clearImported}>OK</button>
+          </div>
+        )}
+        {channelsError && <div className="warn">{channelsError}</div>}
         {channels.length > 0 && (
           <>
             <nav className="channels">
@@ -265,6 +314,13 @@ export default function Home() {
               Adicione canais no campo lá em cima: pode ser o link (<code>youtube.com/@canal</code>),
               o <code>@handle</code>, o ID (<code>UC…</code>) ou até o link de um vídeo do canal.
             </p>
+            {supabaseConfigured && !user && (
+              <p>
+                Já tem conta?{' '}
+                <button className="link-btn" onClick={() => setAuthModal('login')}>Entre</button>{' '}
+                para ver seus canais salvos.
+              </p>
+            )}
           </div>
         )}
 
@@ -343,6 +399,13 @@ export default function Home() {
             </div>
           </div>
         </div>
+      )}
+
+      {supabaseConfigured && authModal && !recovering && (
+        <AuthModal initialMode={authModal} onClose={() => setAuthModal(null)} />
+      )}
+      {supabaseConfigured && recovering && (
+        <AuthModal initialMode="reset" onClose={() => setRecovering(false)} />
       )}
     </>
   );
